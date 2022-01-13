@@ -44,8 +44,8 @@ POST_KB = InlineKeyboardMarkup(inline_keyboard=[
                           callback_data=PostCallback(notification=True).pack())],
     [InlineKeyboardButton(text="🔕 Post this silently",
                           callback_data=PostCallback(notification=False).pack())],
-    # [InlineKeyboardButton(text="🎵 Replace file",
-    #                       callback_data=EditCallback(what="song").pack())],  # TODO
+    [InlineKeyboardButton(text="🎵 Replace file",
+                          callback_data=EditCallback(what="song").pack())],
     [InlineKeyboardButton(text="✏️ Edit YouTube link",
                           callback_data=EditCallback(what="yt_music").pack())],
     [InlineKeyboardButton(text="✏️ Edit Yandex link",
@@ -190,6 +190,41 @@ async def handle_audio(
         data["file_id"],
         text,
         parse_mode="HTML",
+        reply_markup=POST_KB,
+    )
+
+
+@dp.callback_query(SongPostStates.preparing, EditCallback.filter(F.what == "song"), ADMIN_FILTER)
+async def edit_song(query: CallbackQuery, state: FSMContext):
+    # kb = InlineKeyboardMarkup(inline_keyboard=[
+    #     [InlineKeyboardButton(text="🌐 Download with youtube-dl",
+    #                           callback_data=ActionCallback(action="ytdl").pack())]  # TODO
+    # ])
+    await query.message.edit_reply_markup()
+    await state.set_state(SongPostStates.edit_song)
+    m = await query.message.answer(
+        "🎵 Send me new audio file",
+        # reply_markup=kb,
+    )
+    await state.update_data(
+        prompt_msg=m.message_id, reply_to=query.message.reply_to_message.message_id
+    )
+    return query.answer()
+
+
+@dp.message(SongPostStates.edit_song, content_types=["audio"])
+async def save_audio(message: Message, state: FSMContext):
+    data = await state.get_data()
+    # await bot.edit_message_reply_markup(message.chat.id, data["prompt_msg"])
+    file_id = message.audio.file_id
+    await state.update_data(file_id=file_id)
+    await state.set_state(SongPostStates.preparing)
+    return SendAudio(
+        chat_id=message.chat.id,
+        audio=file_id,
+        caption=generate_audio_caption(**data["links"]),
+        parse_mode="HTML",
+        reply_to_message_id=data["reply_to"],
         reply_markup=POST_KB,
     )
 
