@@ -1,28 +1,59 @@
+from __future__ import annotations
+
 from asyncio import run
-from datetime import datetime, timedelta
-from typing import Any, Union, Optional
+from functools import partial
+from typing import overload
 
-from aiogram import Bot, Dispatcher
-from aiogram.api.methods import TelegramMethod, Request
-from aiogram.api.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery, \
-    TelegramObject
-from aiogram.utils.exceptions import TelegramAPIError
+from aiogram import Bot, Dispatcher, F
+from aiogram.dispatcher.filters.callback_data import CallbackData
+from aiogram.dispatcher.fsm.context import FSMContext
+from aiogram.dispatcher.fsm.state import StatesGroup, State
+from aiogram.dispatcher.fsm.storage.memory import MemoryStorage
+from aiogram.methods import SendAudio, EditMessageText
+from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from httpx import AsyncClient
+from yaml import safe_load
 
-from config import ACCEPT_FROM, POST_TO, THROTTLE, TOKEN
+dp = Dispatcher(storage=MemoryStorage())
 
-dp = Dispatcher()
-states: dict[int, dict[str, Any]] = {}
-last_msg: dict[int, datetime] = {}
-client = AsyncClient(base_url='https://api.song.link/v1-alpha.1/')
+with open('config.yaml') as _f:
+    config = safe_load(_f)
+
+
+class EditCallback(CallbackData, prefix="edit"):
+    what: str
+
+
+class PostCallback(CallbackData, prefix="post"):
+    notification: bool
+
+
+class ActionCallback(CallbackData, prefix="action"):
+    action: str
+
+
+class SongPostStates(StatesGroup):
+    edit_wait = State()
+    preparing = State()
+    edit_song = State()
+    edit = State()
+
 
 POST_KB = InlineKeyboardMarkup(inline_keyboard=[
-    [InlineKeyboardButton(text="🎶 Let the party begin!", callback_data="post")],
-    [InlineKeyboardButton(text="🔕 Post this silently", callback_data="post_silent")],
-    [InlineKeyboardButton(text="✋ I'll do it myself", callback_data="delete")],
-    [InlineKeyboardButton(text="✏️ Edit YouTube Link", callback_data="edit_yt_music")],
-    [InlineKeyboardButton(text="✏️ Edit Yandex link", callback_data="edit_yandex")],
-    [InlineKeyboardButton(text="✏️ Edit SoundCloud link", callback_data="edit_scloud")],
+    [InlineKeyboardButton(text="🎶 Let the party begin!",
+                          callback_data=PostCallback(notification=True).pack())],
+    [InlineKeyboardButton(text="🔕 Post this silently",
+                          callback_data=PostCallback(notification=False).pack())],
+    # [InlineKeyboardButton(text="🎵 Replace file",
+    #                       callback_data=EditCallback(what="song").pack())],  # TODO
+    [InlineKeyboardButton(text="✏️ Edit YouTube link",
+                          callback_data=EditCallback(what="yt_music").pack())],
+    [InlineKeyboardButton(text="✏️ Edit Yandex link",
+                          callback_data=EditCallback(what="yandex").pack())],
+    [InlineKeyboardButton(text="✏️ Edit SoundCloud link",
+                          callback_data=EditCallback(what="scloud").pack())],
+    [InlineKeyboardButton(text="❌ Cancel",
+                          callback_data=ActionCallback(action="delete").pack())],
 ])
 FRIENDLY_NAMES = dict(
     spotify="Spotify",
@@ -30,203 +61,236 @@ FRIENDLY_NAMES = dict(
     yandex="Yandex.Music",
     scloud="SoundCloud",
 )
+ADMIN_FILTER = F.from_user.id.in_(config['accept_from'])
 
 
-def accept_only_from_me(e: Union[Message, CallbackQuery]):
-    return e.from_user.id == ACCEPT_FROM
-
-
-class MessageId(TelegramObject):
-    message_id: int
-
-
-class CopyMessage(TelegramMethod[MessageId]):
-    __returning__ = MessageId
-
-    chat_id: Union[int, str]
-    from_chat_id: Union[int, str]
-    message_id: int
-    disable_notification: Optional[bool] = None
-
-    def build_request(self, bot: Bot) -> Request:
-        data = self.dict()
-        return Request(method="copyMessage", data=data)
-
-
-def gen_text(
+@overload
+def generate_audio_caption(
         *,
-        spotify: Optional[str],
-        yt_music: Optional[str],
-        yandex: Optional[str],
-        scloud: Optional[str],
+        spotify: str | None,
+        yt_music: str | None,
+        yandex: str | None,
+        scloud: str | None,
 ) -> str:
+    pass
+
+
+def generate_audio_caption(**kwargs: str | None) -> str:
     text = ""
-    if spotify is not None:
-        text += f'<a href="{spotify}">Spotify</a>\n'
-    if yt_music is not None:
-        text += f'<a href="{yt_music}">YouTube Music</a>\n'
-    if yandex is not None:
-        text += f'<a href="{yandex}">Yandex.Music</a>\n'
-    if scloud is not None:
-        text += f'<a href="{scloud}">SoundCloud</a>\n'
+    for key, name in FRIENDLY_NAMES.items():
+        if key in kwargs and kwargs[key] is not None:
+            text += f'<a href="{kwargs[key]}">{name}</a>\n'
     return text
 
 
 def extract_links(links: dict[str, dict[str, str]]) -> dict[str, str]:
-    return dict(
-        spotify=links.get("spotify", {}).get("url"),
-        yt_music=links.get("youtubeMusic", {}).get("url"),
-        yandex=links.get("yandex", {}).get("url"),
-        scloud=links.get("soundcloud", {}).get("url"),
+    return {
+        dest: links.get(src, {}).get("url")
+        for src, dest
+        in zip(("spotify", "youtubeMusic", "yandex", "soundcloud"), FRIENDLY_NAMES.keys())
+    }
+
+
+@dp.message(ADMIN_FILTER, F.audio.duration < 3, content_types=["audio"])
+async def audio_first_seen(event: Message, state: FSMContext):
+    await state.set_state(SongPostStates.edit_wait)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="⏩ Continue anyway",
+                              callback_data=ActionCallback(action="retry").pack())]
+    ])
+    m = await event.reply("⏳ Waiting for music to download…", reply_markup=kb)
+    await state.update_data(message_id=m.message_id)
+
+
+async def get_platform_links(client: AsyncClient, spotify_song_id: str) -> dict[str, str] | None:
+    resp = await client.get(
+        '/links',
+        params=dict(platform='spotify', type='song', id=spotify_song_id),
     )
+    if resp.status_code not in range(200, 300):
+        print(resp.text)  # FIXME: use logging
+        return None
+    return extract_links(resp.json()["linksByPlatform"])
+
+
+async def process_audio(
+        message: Message,
+        bot: Bot,
+        state: FSMContext,
+        client: AsyncClient,
+) -> tuple[bool, str]:
+    # find audio id
+    for entity in (message.caption_entities or ()):
+        if entity.type == "text_link" and entity.url.startswith(''):
+            spotify_id = entity.url.rsplit('/', maxsplit=1)[1]
+            break
+    else:
+        return False, "❌ No valid Spotify link found"
+
+    # get platform links
+    await bot.send_chat_action(message.chat.id, "upload_document")
+    links = await get_platform_links(client, spotify_id)
+    if links is None:
+        return False, "❌ Error! Upstream returned an error. See logs for details."
+
+    # messing with data
+    file_id = message.audio.file_id
+    await state.update_data(file_id=file_id, links=links, reply_to=message.message_id)
+
+    return True, generate_audio_caption(**links)
+
+
+@dp.callback_query(ADMIN_FILTER, ActionCallback.filter(F.action == "retry"))
+@dp.edited_message(
+    SongPostStates.edit_wait,
+    ADMIN_FILTER,
+    F.audio.duration >= 3,
+    content_types=["audio"],
+)
+@dp.message(
+    ADMIN_FILTER,
+    F.audio.duration >= 3,
+    content_types=["audio"],
+    state=None,
+)
+async def handle_audio(
+        event: CallbackQuery | Message,
+        bot: Bot,
+        state: FSMContext,
+        client: AsyncClient,
+):
+    if isinstance(event, CallbackQuery):
+        message = event.message.reply_to_message
+        to_delete = event.message.message_id
+        reply = event.message.edit_text
+        await event.answer()
+    else:
+        message = event
+        to_delete = (await state.get_data()).get("message_id")
+        if to_delete is not None:
+            # edited message
+            reply = partial(EditMessageText, chat_id=event.chat.id, message_id=to_delete)
+        else:
+            # new message
+            reply = event.reply
+    ok, text = await process_audio(message, bot, state, client)
+    if not ok:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🔁 Try again",
+                                  callback_data=ActionCallback(action="retry").pack())]
+        ])
+        return reply(text=text, reply_markup=kb)
+
+    await state.set_state(SongPostStates.preparing)
+    data = await state.get_data()
+    if to_delete is not None:
+        await bot.delete_message(message.chat.id, to_delete)
+
+    return message.reply_audio(
+        data["file_id"],
+        text,
+        parse_mode="HTML",
+        reply_markup=POST_KB,
+    )
+
+
+@dp.callback_query(SongPostStates.preparing, EditCallback.filter(), ADMIN_FILTER)
+async def edit_link(query: CallbackQuery, callback_data: EditCallback, state: FSMContext):
+    key = callback_data.what
+    friendly_name = FRIENDLY_NAMES.get(key)
+    if friendly_name is None:
+        return query.answer(f"⁉️ Unknown platform {key!r}")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Remove existing link",
+                              callback_data=ActionCallback(action="pop_link").pack())],
+    ])
+    await query.message.edit_reply_markup()
+    await state.set_state(SongPostStates.edit)
+    m = await query.message.answer(
+        f"🔗 Enter new link for <i>{friendly_name}</i>",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+    await state.update_data(
+        key=key, prompt_msg=m.message_id, reply_to=query.message.reply_to_message.message_id
+    )
+    return query.answer()
+
+
+async def update_link(
+        new_value: str | None,
+        state: FSMContext,
+        chat_id: int,
+        bot: Bot,
+) -> SendAudio:
+    data = await state.get_data()
+    await bot.edit_message_reply_markup(chat_id, data["prompt_msg"])
+    links = data["links"]
+    links.update({data["key"]: new_value})
+    await state.update_data(links=links)
+    await state.set_state(SongPostStates.preparing)
+    return SendAudio(
+        chat_id=chat_id,
+        audio=data["file_id"],
+        caption=generate_audio_caption(**links),
+        parse_mode="HTML",
+        reply_to_message_id=data["reply_to"],
+        reply_markup=POST_KB,
+    )
+
+
+@dp.callback_query(SongPostStates.edit, ActionCallback.filter(F.action == "pop_link"), ADMIN_FILTER)
+async def pop_link(query: CallbackQuery, bot: Bot, state: FSMContext):
+    return await update_link(None, state, query.message.chat.id, bot)
+
+
+@dp.message(SongPostStates.edit, ADMIN_FILTER)
+async def resend_with_edited(message: Message, bot: Bot, state: FSMContext):
+    return await update_link(message.text, state, message.chat.id, bot)
+
+
+@dp.callback_query(SongPostStates.preparing, PostCallback.filter(), ADMIN_FILTER)
+async def post(query: CallbackQuery, callback_data: PostCallback, state: FSMContext):
+    is_silent = callback_data.notification
+    dest = str(config['post_to'])
+    message = await query.message.copy_to(dest, disable_notification=is_silent)
+    await state.clear()
+    link_dest = dest.lstrip('@') if dest.startswith('@') else f"c/{dest.removeprefix('-100')}"
+    await query.message.edit_caption(f"https://t.me/{link_dest}/{message.message_id}")
+    return query.answer("📩{} Successfully posted!".format("🔕" if is_silent else "🔔"))
+
+
+@dp.callback_query(ActionCallback.filter(F.action == "delete"))
+async def nope(query: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await query.message.edit_reply_markup()
+    return query.answer("👌")
 
 
 @dp.message(commands=["start", "help"])
 async def hello(event: Message):
-    await event.reply("👋 Hello! I can help you suggest new music to @evgenrandmuz! Simply send me"
-                      " the name of the track or the track itself and I'll forward it.")
-
-
-@dp.message(accept_only_from_me, content_types=["audio"])
-async def audio_first_seen(event: Message):
-    state = states[event.chat.id] = {}
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="✅ Already", callback_data="handle")],
-    ])
-    m = await event.reply("⏳ Waiting for this message to be edited…", reply_markup=kb)
-    state["message_id"] = m.message_id
-
-
-@dp.callback_query(text="handle")
-@dp.edited_message(accept_only_from_me, content_types=["audio"])
-async def handle_audio(event: Union[Message, CallbackQuery], bot: Bot):
-    orig_event = event
-    if isinstance(event, CallbackQuery):
-        event = event.message.reply_to_message
-    if (state := states.get(event.chat.id)) is None:
-        if isinstance(orig_event, CallbackQuery):
-            await orig_event.answer("⁉")
-            await bot.edit_message_reply_markup(event.chat.id, orig_event.message.message_id)
-        return
-    file_id = state["file_id"] = event.audio.file_id
-    for entity in event.caption_entities:
-        if entity.type == "text_link" and entity.url.startswith('https://song.link/s/'):
-            id_ = entity.url.rsplit('/', maxsplit=1)[1]
-            break
-    else:
-        await bot.edit_message_text("❌ Error! No suitable link found!", event.chat.id,
-                                    state["message_id"])
-        del states[event.chat.id]
-        return
-    await bot.send_chat_action(event.chat.id, "upload_document")
-    resp = await client.get('/links', params=dict(platform='spotify', type='song', id=id_))
-    if resp.status_code not in range(200, 300):
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="🔁 Try again", callback_data="handle")]
-        ])
-        try:
-            await bot.edit_message_text(
-                f"❌ Error! Upstream returned an error: <code>{resp.text}</code>",
-                event.chat.id, state["message_id"], parse_mode="HTML", reply_markup=kb,
-            )
-            return 
-        except TelegramAPIError as e:
-            if 'not modified' not in str(e):
-                raise
-    api_resp = resp.json()
-    links = state["links"] = extract_links(api_resp["linksByPlatform"])
-    text = gen_text(**links)
-
-    await event.reply_audio(file_id, text, parse_mode="HTML", reply_markup=POST_KB)
-    await bot.delete_message(event.chat.id, state.pop("message_id"))
-    # del states[event.chat.id]
-
-
-@dp.message(lambda m: states.get(m.chat.id, {}).get("svc") is not None, accept_only_from_me)
-async def resend_with_edited(event: Message, bot: Bot):
-    state = states[event.chat.id]
-    await bot.edit_message_reply_markup(event.chat.id, state["link_msg"])
-    links = state["links"]
-    links.update({state["svc"]: event.text})
-    text = gen_text(**links)
-    await event.reply_audio(state["file_id"], text, parse_mode="HTML", reply_markup=POST_KB)
+    return event.reply("👋 Hello! I can help you suggest new music to @evgenrandmuz! Simply send me"
+                       " the name of the track or the track itself and I'll forward it.")
 
 
 @dp.message(content_types=["text", "audio"])
-async def fwd(event: Message, bot: Bot):
-    if last_msg.get(event.chat.id, datetime(1970, 1, 1)) + timedelta(minutes=1) > datetime.utcnow()\
-            and THROTTLE:
-        await event.reply("🐢 Can't send more than one message per minute, try again later")
-        return
-    await bot(CopyMessage(chat_id=ACCEPT_FROM, from_chat_id=event.chat.id,
-                          message_id=event.message_id))
-    last_msg[event.chat.id] = datetime.utcnow()
-    await event.reply("📩 Okay, I've forwarded it, thanks!")
-
-
-@dp.callback_query(lambda q: q.data.startswith("post"), accept_only_from_me)
-async def post(query: CallbackQuery, bot: Bot):
-    silent = query.data.endswith("silent")
-    m = await bot(CopyMessage(chat_id=POST_TO, from_chat_id=query.message.chat.id,
-                              message_id=query.message.message_id, disable_notification=silent))
-    await query.answer("📩 Successfully posted! {}".format("🔕" if silent else "🔔"))
-    await bot.edit_message_caption(query.message.chat.id, query.message.message_id,
-                                   caption=f"https://t.me/{POST_TO.lstrip('@')}/{m.message_id}")
-    del states[query.message.chat.id]
-
-
-@dp.callback_query(lambda q: q.data.startswith("edit"), accept_only_from_me)
-async def edit_link(query: CallbackQuery, bot: Bot):
-    if (state := states.get(query.message.chat.id)) is None:
-        await query.answer("⁉️")
-        return
-    svc = query.data.split('_', maxsplit=1)[1]
-    # state["message_id"] = query.message.message_id
-    state["svc"] = svc
-    svc_friendly = FRIENDLY_NAMES.get(svc)
-    if svc_friendly is None:
-        await query.answer(f"⁉️ Unknown platform {svc}")
-        return
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="❌ Remove existing link", callback_data="pop")],
-    ])
-    await query.answer()
-    await bot.edit_message_reply_markup(query.message.chat.id, query.message.message_id)
-    m = await bot.send_message(query.message.chat.id,
-                               f"🔗 Enter new link for <i>{svc_friendly}</i>",
-                               parse_mode="HTML", reply_markup=kb)
-    state["link_msg"] = m.message_id
-
-
-@dp.callback_query(lambda q: q.data.startswith("pop"), accept_only_from_me)
-async def pop_link(query: CallbackQuery, bot: Bot):
-    if (state := states.get(query.message.chat.id)) is None:
-        await query.answer("⁉️")
-        return
-    await bot.edit_message_reply_markup(query.message.chat.id, state["link_msg"])
-    links = state["links"]
-    links.update({state["svc"]: None})
-    text = gen_text(**links)
-    await query.message.answer_audio(state["file_id"], text, parse_mode="HTML",
-                                     reply_markup=POST_KB)
-
-
-@dp.callback_query(text="delete")
-async def nope(query: CallbackQuery, bot: Bot):
-    await query.answer("👌")
-    await bot.edit_message_reply_markup(query.message.chat.id, query.message.message_id)
-    del states[query.message.chat.id]
+async def fwd(message: Message):
+    # now = datetime.utcnow()
+    # if config["throttle"] \
+    #         and last_msg.get(event.chat.id, datetime(1970, 1, 1)) + timedelta(minutes=1) > now:
+    #     return message.reply("🐢 Can't send more than one message per minute, try again later")
+    # last_msg[message.chat.id] = now
+    await message.copy_to(chat_id=config['accept_from'][0])
+    return message.reply("📩 Okay, I've forwarded it, thanks!")
 
 
 async def main():
+    client = AsyncClient(base_url='https://api.song.link/v1-alpha.1/')
     try:
-        await dp.start_polling(Bot(TOKEN))
+        await dp.start_polling(Bot(config["token"]), client=client)
     finally:
         await client.aclose()
 
 
 if __name__ == '__main__':
-    try:
-        run(main())
-    except (KeyboardInterrupt, SystemExit):
-        pass  # don't show traceback
+    run(main())
