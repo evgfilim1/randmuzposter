@@ -4,16 +4,18 @@ A simple bot to help with posting music to my channel.
 
 ## Dependencies
 - Python 3.10
-- aiogram 3.0.0b1
-- PyYAML
+- aiogram 3.0.0b5
 - httpx
 
 ## Setup
 1. (Optional) Create and activate venv: `python3.10 -m venv .venv && source .venv/bin/activate`
-2. Copy `config.example.yaml` to `config.yaml` and edit the latter.
+2. Copy `.env.example` to `.env` and edit the latter.
 3. Install requirements with `pip install -r requirements.txt`
 
-Run the bot with `python main.py`
+## Run
+1. Source venv if you created one: `source .venv/bin/activate`
+2. Export environment variables (it's safe, trust me): `eval "$(sed '/^#/d;s/^/export /' <.env)"`
+3. Run the bot with `python -m randmuzposter`
 
 ## Usage
 Send a music file with Spotify link attached to it in caption (e.g. with [@nowplaybot][nowplay]).
