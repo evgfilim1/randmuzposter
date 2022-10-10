@@ -5,20 +5,23 @@ __all__ = [
     "SongLinkClient",
 ]
 
+import re
 from types import TracebackType
-from typing import Type, TypeVar, overload
+from typing import Any, Type, TypeVar, overload
 
 import httpx
 from aiogram.types import MessageEntity
 
-from .constants import Service
+from .constants import SERVICE_LINKS, SONG_LINK_REGEX, Service
 
 _ET = TypeVar("_ET", bound=BaseException)
 
 
 class SongLinkClient:
-    def __init__(self):
+    def __init__(self, user_country: str | None = None) -> None:
         self._client = httpx.AsyncClient(base_url="https://api.song.link/v1-alpha.1/")
+        if user_country is not None:
+            self._client.params = {"userCountry": user_country}
 
     async def __aenter__(self):
         return self
@@ -39,20 +42,29 @@ class SongLinkClient:
     ) -> None:
         await self._client.aclose()
 
+    async def _request(self, **params: str) -> dict[str, Any]:
+        resp = await self._client.get("/links", params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def get_platform_links_by_url(self, url: str) -> dict[Service, str] | None:
+        data = await self._request(url=url)
+        return {
+            service: link
+            for service in Service
+            if (link := data["linksByPlatform"].get(service.name, {}).get("url")) is not None
+        }
+
     async def get_platform_links_by_song(
         self,
         platform: Service,
         song_id: str,
     ) -> dict[Service, str] | None:
-        resp = await self._client.get(
-            "/links",
-            params=dict(platform=platform.name, type="song", id=song_id),
-        )
-        resp.raise_for_status()
+        data = await self._request(platform=platform.name, type="song", id=song_id)
         return {
             service: link
             for service in Service
-            if (link := resp.json()["linksByPlatform"].get(service.name, {}).get("url")) is not None
+            if (link := data["linksByPlatform"].get(service.name, {}).get("url")) is not None
         }
 
 
@@ -73,19 +85,39 @@ class AudioProcessingError(ValueError):
     pass
 
 
+def detect_audio_link(
+    entity: MessageEntity,
+    caption: str | None,
+) -> tuple[Service | None, re.Match[str]] | None:
+    if entity.type != "text_link":
+        if entity.type != "url" or caption is None:
+            return None
+        url = entity.extract_from(caption)
+    else:
+        url = entity.url
+    if match := SONG_LINK_REGEX.search(url):
+        return None, match
+    for service, link_re in SERVICE_LINKS.items():
+        if match := link_re.match(url):
+            return service, match
+    return None
+
+
 async def process_audio(
+    caption: str | None,
     caption_entities: list[MessageEntity] | None,
     client: SongLinkClient,
 ) -> dict[Service, str]:
     for entity in caption_entities or ():
-        if entity.type == "text_link" and entity.url.startswith(""):
-            spotify_id = entity.url.rsplit("/", maxsplit=1)[1]
+        res = detect_audio_link(entity, caption)
+        if res is not None:
+            link = res[1][0]
             break
     else:
-        raise AudioProcessingError("No valid Spotify link found")
+        raise AudioProcessingError("No valid link found")
 
     try:
-        links = await client.get_platform_links_by_song(Service.spotify, spotify_id)
+        links = await client.get_platform_links_by_url(link)
     except httpx.HTTPError as e:
         raise AudioProcessingError("Upstream returned an error. See logs for details.") from e
 

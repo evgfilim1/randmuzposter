@@ -5,6 +5,7 @@ __all__ = [
 import asyncio
 import logging
 
+import httpx
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
@@ -102,7 +103,7 @@ async def handle_audio_common(
     client: SongLinkClient,
 ) -> dict[str, str | InlineKeyboardMarkup] | SendAudio:
     try:
-        links = await process_audio(message.caption_entities, client)
+        links = await process_audio(message.caption, message.caption_entities, client)
     except AudioProcessingError as e:
         kb = (
             InlineKeyboardBuilder()
@@ -117,7 +118,11 @@ async def handle_audio_common(
             .adjust(1)
             .as_markup()
         )
-        logging.exception("Error processing audio")
+        if isinstance(e.__cause__, httpx.HTTPStatusError):
+            details = repr(e.__cause__.response.json()["code"])
+        else:
+            details = e.__cause__.__class__.__name__
+        logging.exception(f"Error processing audio: {details}")
         return dict(text=f"❌ {e}", reply_markup=kb)
 
     await state.update_data(

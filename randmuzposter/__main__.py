@@ -12,8 +12,8 @@ from .utils import SongLinkClient
 
 
 async def _main():
-    client = SongLinkClient()
     config = Config()
+    client = SongLinkClient(user_country=config.user_country)
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(router)
     dp.message.middleware(ChatActionMiddleware())
