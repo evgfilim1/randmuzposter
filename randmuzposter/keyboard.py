@@ -18,6 +18,7 @@ from .constants import Service
 
 class Action(Enum):
     RETRY = "retry"
+    TOGGLE_SUGGESTED = "toggle_suggested"
     POP_LINK = "pop_link"
     CANCEL = "delete"
 
@@ -46,7 +47,10 @@ def _generate_post_kb() -> InlineKeyboardMarkup:
             text=f"✏ Edit {service.value} link",
             callback_data=EditCallback(what=service),
         )
-    # TODO: mark song as suggested
+    builder.button(
+        text="💡 Toggle suggested",
+        callback_data=ActionCallback(action=Action.TOGGLE_SUGGESTED),
+    )
     builder.button(text="❌ Cancel", callback_data=ActionCallback(action=Action.CANCEL))
     return builder.adjust(1).as_markup()
 

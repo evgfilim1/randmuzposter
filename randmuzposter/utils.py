@@ -3,6 +3,7 @@ __all__ = [
     "generate_audio_caption",
     "process_audio",
     "SongLinkClient",
+    "suggested_track_text",
 ]
 
 import re
@@ -75,18 +76,27 @@ class SongLinkClient:
         return res
 
 
-def generate_audio_caption(kwargs: dict[Service | str, str]) -> str:
+def generate_audio_caption(links: dict[Service | str, str]) -> str:
     text = ""
     for service in Service:
-        if kwargs.get(service.name) is not None:
-            link = kwargs[service.name]
-        elif kwargs.get(service) is not None:
-            link = kwargs[service]
+        if links.get(service.name) is not None:
+            link = links[service.name]
+        elif links.get(service) is not None:
+            link = links[service]
         else:
             continue
         text += f'<a href="{link}">{service.value}</a>\n'
-    text += f"\n<a href='{kwargs['self']}'>Other</a>"
+    text += f"<a href='{links['self']}'>Other</a>\n"
     return text
+
+
+def suggested_track_text(bot_username: str) -> str:
+    self_link = f"https://t.me/{bot_username}"
+    return (
+        f"_______\n"
+        f"Трек из <a href='{self_link}'>предложки</a>\n"
+        f"<a href='{self_link}'>Suggested</a> track"
+    )
 
 
 class AudioProcessingError(ValueError):

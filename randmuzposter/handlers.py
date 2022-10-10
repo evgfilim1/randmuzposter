@@ -20,7 +20,13 @@ from .constants import Service
 from .filters import admin_filter
 from .keyboard import Action, POST_KB, ActionCallback, EditCallback, PostCallback
 from .states import SongPostStates
-from .utils import AudioProcessingError, SongLinkClient, generate_audio_caption, process_audio
+from .utils import (
+    AudioProcessingError,
+    SongLinkClient,
+    generate_audio_caption,
+    process_audio,
+    suggested_track_text,
+)
 
 router = Router()
 
@@ -169,15 +175,18 @@ async def edit_song(query: CallbackQuery, state: FSMContext):
 
 
 @router.message(SongPostStates.edit_song, F.audio, flags={"chat_action": "upload_audio"})
-async def save_audio(message: Message, state: FSMContext):
+async def save_audio(message: Message, state: FSMContext, bot: Bot):
     data = await state.get_data()
     file_id = message.audio.file_id
     await state.update_data(file_id=file_id)
     await state.set_state(SongPostStates.preparing)
+    caption = generate_audio_caption(data["links"])
+    if data.get("suggested", False):
+        caption += suggested_track_text((await bot.me()).username)
     return SendAudio(
         chat_id=message.chat.id,
         audio=file_id,
-        caption=generate_audio_caption(data["links"]),
+        caption=caption,
         parse_mode="HTML",
         reply_to_message_id=data["reply_to"],
         reply_markup=POST_KB,
@@ -239,14 +248,33 @@ async def update_link(
             pass  # it's ok if it's missing
     await state.update_data(links=links)
     await state.set_state(SongPostStates.preparing)
+    caption = generate_audio_caption(links)
+    if data.get("suggested", False):
+        caption += suggested_track_text((await bot.me()).username)
     return SendAudio(
         chat_id=chat_id,
         audio=data["file_id"],
-        caption=generate_audio_caption(links),
+        caption=caption,
         parse_mode="HTML",
         reply_to_message_id=data["reply_to"],
         reply_markup=POST_KB,
     )
+
+
+@router.callback_query(
+    admin_filter,
+    SongPostStates.preparing,
+    ActionCallback.filter(F.action == Action.TOGGLE_SUGGESTED),
+)
+async def toggle_suggested(query: CallbackQuery, state: FSMContext, bot: Bot):
+    data = await state.get_data()
+    new_suggested = not data.get("suggested", False)
+    await state.update_data(suggested=new_suggested)
+    caption = generate_audio_caption(data["links"])
+    if new_suggested:
+        caption += suggested_track_text((await bot.me()).username)
+    await query.message.edit_caption(caption, parse_mode="HTML", reply_markup=POST_KB)
+    return query.answer()
 
 
 @router.callback_query(admin_filter, SongPostStates.preparing, PostCallback.filter())
