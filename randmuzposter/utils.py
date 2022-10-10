@@ -7,7 +7,7 @@ __all__ = [
 
 import re
 from types import TracebackType
-from typing import Any, Type, TypeVar, overload
+from typing import Any, Literal, Type, TypeVar, overload
 
 import httpx
 from aiogram.types import MessageEntity
@@ -47,25 +47,32 @@ class SongLinkClient:
         resp.raise_for_status()
         return resp.json()
 
-    async def get_platform_links_by_url(self, url: str) -> dict[Service, str] | None:
+    async def get_platform_links_by_url(
+        self,
+        url: str,
+    ) -> dict[Service | Literal["self"], str] | None:
         data = await self._request(url=url)
-        return {
+        res = {
             service: link
             for service in Service
             if (link := data["linksByPlatform"].get(service.name, {}).get("url")) is not None
         }
+        res["self"] = data["pageUrl"]
+        return res
 
     async def get_platform_links_by_song(
         self,
         platform: Service,
         song_id: str,
-    ) -> dict[Service, str] | None:
+    ) -> dict[Service | Literal["self"], str] | None:
         data = await self._request(platform=platform.name, type="song", id=song_id)
-        return {
+        res = {
             service: link
             for service in Service
             if (link := data["linksByPlatform"].get(service.name, {}).get("url")) is not None
         }
+        res["self"] = data["pageUrl"]
+        return res
 
 
 def generate_audio_caption(kwargs: dict[Service | str, str]) -> str:
@@ -78,6 +85,7 @@ def generate_audio_caption(kwargs: dict[Service | str, str]) -> str:
         else:
             continue
         text += f'<a href="{link}">{service.value}</a>\n'
+    text += f"\n<a href='{kwargs['self']}'>Other</a>"
     return text
 
 

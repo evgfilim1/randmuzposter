@@ -126,7 +126,7 @@ async def handle_audio_common(
         return dict(text=f"❌ {e}", reply_markup=kb)
 
     await state.update_data(
-        links={k.name: v for k, v in links.items()},
+        links={getattr(k, "name", k): v for k, v in links.items()},
         file_id=message.audio.file_id,
     )
     await state.set_state(SongPostStates.preparing)
