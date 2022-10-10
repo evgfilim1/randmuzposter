@@ -5,10 +5,11 @@ from functools import partial
 from typing import overload
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.dispatcher.filters.callback_data import CallbackData
-from aiogram.dispatcher.fsm.context import FSMContext
-from aiogram.dispatcher.fsm.state import StatesGroup, State
-from aiogram.dispatcher.fsm.storage.memory import MemoryStorage
+from aiogram.filters import Command
+from aiogram.filters.callback_data import CallbackData
+from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import StatesGroup, State, default_state
+from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.methods import SendAudio, EditMessageText
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from httpx import AsyncClient
@@ -115,7 +116,7 @@ def extract_links(links: dict[str, dict[str, str]]) -> dict[str, str]:
     }
 
 
-@dp.message(ADMIN_FILTER, F.audio.duration < 3, content_types=["audio"])
+@dp.message(ADMIN_FILTER, F.audio.duration < 3)
 async def audio_first_seen(event: Message, state: FSMContext):
     await state.set_state(SongPostStates.edit_wait)
     kb = InlineKeyboardMarkup(
@@ -174,13 +175,11 @@ async def process_audio(
     SongPostStates.edit_wait,
     ADMIN_FILTER,
     F.audio.duration >= 3,
-    content_types=["audio"],
 )
 @dp.message(
     ADMIN_FILTER,
     F.audio.duration >= 3,
-    content_types=["audio"],
-    state=None,
+    default_state,
 )
 async def handle_audio(
     event: CallbackQuery | Message,
@@ -252,7 +251,7 @@ async def edit_song(query: CallbackQuery, state: FSMContext):
     return query.answer()
 
 
-@dp.message(SongPostStates.edit_song, content_types=["audio"])
+@dp.message(SongPostStates.edit_song, F.audio)
 async def save_audio(message: Message, state: FSMContext):
     data = await state.get_data()
     # await bot.edit_message_reply_markup(message.chat.id, data["prompt_msg"])
@@ -348,7 +347,7 @@ async def nope(query: CallbackQuery, state: FSMContext):
     return query.answer("👌")
 
 
-@dp.message(commands=["start", "help"])
+@dp.message(Command("start", "help"))
 async def hello(event: Message):
     return event.reply(
         "👋 Hello! I can help you suggest new music to @evgenrandmuz! Simply send me"
@@ -356,7 +355,7 @@ async def hello(event: Message):
     )
 
 
-@dp.message(content_types=["text", "audio"])
+@dp.message(F.text | F.audio)
 async def fwd(message: Message):
     # now = datetime.utcnow()
     # if config["throttle"] \
@@ -370,7 +369,11 @@ async def fwd(message: Message):
 async def main():
     client = AsyncClient(base_url="https://api.song.link/v1-alpha.1/")
     try:
-        await dp.start_polling(Bot(config["token"]), client=client)
+        await dp.start_polling(
+            Bot(config["token"]),
+            client=client,
+            allowed_updates=dp.resolve_used_update_types(),
+        )
     finally:
         await client.aclose()
 
