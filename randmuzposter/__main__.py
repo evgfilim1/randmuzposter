@@ -1,4 +1,4 @@
-__all__ = []
+__all__: list[str] = []
 
 from asyncio import run
 
@@ -11,7 +11,7 @@ from .handlers import router
 from .utils import SongLinkClient
 
 
-async def _main():
+async def _main() -> None:
     config = Config()
     client = SongLinkClient(user_country=config.user_country)
     dp = Dispatcher(storage=MemoryStorage())
@@ -26,7 +26,7 @@ async def _main():
         )
 
 
-def main():
+def main() -> None:
     run(_main())
 
 

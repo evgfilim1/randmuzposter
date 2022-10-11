@@ -4,21 +4,28 @@ __all__ = [
 
 import asyncio
 import logging
+from typing import Any, cast
 
 import httpx
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import default_state
-from aiogram.methods import SendAudio
-from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
+from aiogram.methods import (
+    AnswerCallbackQuery,
+    EditMessageText,
+    SendAudio,
+    SendMessage,
+    TelegramMethod,
+)
+from aiogram.types import Audio, CallbackQuery, Message
 from aiogram.utils.chat_action import ChatActionSender
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from .config import Config
 from .constants import Service
 from .filters import admin_filter
-from .keyboard import Action, POST_KB, ActionCallback, EditCallback, PostCallback
+from .keyboard import POST_KB, Action, ActionCallback, EditCallback, PostCallback
 from .states import SongPostStates
 from .utils import (
     AudioProcessingError,
@@ -32,7 +39,7 @@ router = Router()
 
 
 @router.message(admin_filter, F.audio.duration < 3)
-async def audio_first_seen(event: Message, state: FSMContext):
+async def audio_first_seen(event: Message, state: FSMContext) -> None:
     await state.set_state(SongPostStates.edit_wait)
     kb = (
         InlineKeyboardBuilder()
@@ -60,12 +67,13 @@ async def handle_retry(
     state: FSMContext,
     bot: Bot,
     client: SongLinkClient,
-):
-    async with ChatActionSender(chat_id=query.message.chat.id, action="upload_audio", bot=bot):
-        res = await handle_audio_common(query.message.reply_to_message, state, client)
+) -> SendAudio | EditMessageText:
+    message = cast(Message, query.message)
+    async with ChatActionSender(chat_id=message.chat.id, action="upload_audio", bot=bot):
+        res = await handle_audio_common(cast(Message, message.reply_to_message), state, client)
         if isinstance(res, dict):
-            return query.message.edit_text(**res)
-        await asyncio.gather(bot(query.answer()), bot(query.message.delete()))
+            return message.edit_text(**res)
+        await asyncio.gather(bot(query.answer()), bot(message.delete()))
         return res
 
 
@@ -80,7 +88,7 @@ async def handle_downloaded(
     state: FSMContext,
     bot: Bot,
     client: SongLinkClient,
-):
+) -> SendAudio | EditMessageText:
     res = await handle_audio_common(message, state, client)
     if isinstance(res, dict):
         return message.edit_text(**res)
@@ -99,15 +107,20 @@ async def handle_audio(
     message: Message,
     state: FSMContext,
     client: SongLinkClient,
-):
-    return await handle_audio_common(message, state, client)
+) -> SendAudio | SendMessage:
+    res = await handle_audio_common(message, state, client)
+    if isinstance(res, dict):
+        return message.reply(**res)
+    return res
 
 
 async def handle_audio_common(
     message: Message,
     state: FSMContext,
     client: SongLinkClient,
-) -> dict[str, str | InlineKeyboardMarkup] | SendAudio:
+) -> dict[str, Any] | SendAudio:
+    if message.audio is None:
+        raise ValueError("Message is not an audio message")
     try:
         links = await process_audio(message.caption, message.caption_entities, client)
     except AudioProcessingError as e:
@@ -139,7 +152,7 @@ async def handle_audio_common(
 
     return message.reply_audio(
         message.audio.file_id,
-        generate_audio_caption(links),
+        generate_audio_caption(links),  # type: ignore[arg-type]  # wtf?
         parse_mode="HTML",
         reply_markup=POST_KB,
     )
@@ -150,7 +163,7 @@ async def handle_audio_common(
     SongPostStates.preparing,
     EditCallback.filter(F.what == "song"),
 )
-async def edit_song(query: CallbackQuery, state: FSMContext):
+async def edit_song(query: CallbackQuery, state: FSMContext) -> AnswerCallbackQuery:
     # kb = InlineKeyboardMarkup(
     #     inline_keyboard=[
     #         [
@@ -161,28 +174,40 @@ async def edit_song(query: CallbackQuery, state: FSMContext):
     #         ]  # TODO
     #     ]
     # )
-    await query.message.edit_reply_markup()
+    message = cast(Message, query.message)
+    await message.edit_reply_markup()
     await state.set_state(SongPostStates.edit_song)
-    m = await query.message.answer(
+    m = await message.answer(
         "🎵 Send me new audio file",
         # reply_markup=kb,
     )
     await state.update_data(
         prompt_msg=m.message_id,
-        reply_to=query.message.reply_to_message.message_id,
+        reply_to=cast(Message, message.reply_to_message).message_id,
     )
     return query.answer()
 
 
-@router.message(SongPostStates.edit_song, F.audio, flags={"chat_action": "upload_audio"})
-async def save_audio(message: Message, state: FSMContext, bot: Bot):
+@router.message(
+    SongPostStates.edit_song,
+    F.audio.as_("audio"),
+    flags={"chat_action": "upload_audio"},
+)
+async def save_audio(
+    message: Message,
+    state: FSMContext,
+    audio: Audio,
+    bot: Bot,
+) -> TelegramMethod[Message]:
     data = await state.get_data()
-    file_id = message.audio.file_id
+    file_id = audio.file_id
     await state.update_data(file_id=file_id)
     await state.set_state(SongPostStates.preparing)
     caption = generate_audio_caption(data["links"])
     if data.get("suggested", False):
-        caption += suggested_track_text((await bot.me()).username)
+        username = (await bot.me()).username
+        if username is not None:
+            caption += suggested_track_text(username)
     return SendAudio(
         chat_id=message.chat.id,
         audio=file_id,
@@ -194,24 +219,33 @@ async def save_audio(message: Message, state: FSMContext, bot: Bot):
 
 
 @router.callback_query(admin_filter, SongPostStates.preparing, EditCallback.filter())
-async def edit_link(query: CallbackQuery, callback_data: EditCallback, state: FSMContext):
-    key = callback_data.what
+async def edit_link(
+    query: CallbackQuery,
+    callback_data: EditCallback,
+    state: FSMContext,
+) -> TelegramMethod[bool]:
+    key = cast(Service, callback_data.what)  # Literal["song"] is handled in `edit_song` above
     service = Service(key)
-    kb = InlineKeyboardBuilder().button(
-        text="❌ Remove existing link",
-        callback_data=ActionCallback(action=Action.POP_LINK),
-    ).as_markup()
+    kb = (
+        InlineKeyboardBuilder()
+        .button(
+            text="❌ Remove existing link",
+            callback_data=ActionCallback(action=Action.POP_LINK),
+        )
+        .as_markup()
+    )
     await state.set_state(SongPostStates.edit)
-    m = await query.message.answer(
+    message = cast(Message, query.message)
+    m = await message.answer(
         f"🔗 Enter new link for <i>{service.value}</i>",
         parse_mode="HTML",
         reply_markup=kb,
     )
-    await query.message.edit_reply_markup()
+    await message.edit_reply_markup()
     await state.update_data(
         key=key.name,
         prompt_msg=m.message_id,
-        reply_to=query.message.reply_to_message.message_id,
+        reply_to=cast(Message, message.reply_to_message).message_id,
     )
     return query.answer()
 
@@ -221,12 +255,16 @@ async def edit_link(query: CallbackQuery, callback_data: EditCallback, state: FS
     SongPostStates.edit,
     ActionCallback.filter(F.action == Action.POP_LINK),
 )
-async def pop_link(query: CallbackQuery, bot: Bot, state: FSMContext):
-    return await update_link(None, state, query.message.chat.id, bot)
+async def pop_link(query: CallbackQuery, bot: Bot, state: FSMContext) -> TelegramMethod[Message]:
+    return await update_link(None, state, cast(Message, query.message).chat.id, bot)
 
 
 @router.message(admin_filter, SongPostStates.edit, flags={"chat_action": "upload_audio"})
-async def resend_with_edited(message: Message, bot: Bot, state: FSMContext):
+async def resend_with_edited(
+    message: Message,
+    bot: Bot,
+    state: FSMContext,
+) -> TelegramMethod[Message]:
     return await update_link(message.text, state, message.chat.id, bot)
 
 
@@ -250,7 +288,9 @@ async def update_link(
     await state.set_state(SongPostStates.preparing)
     caption = generate_audio_caption(links)
     if data.get("suggested", False):
-        caption += suggested_track_text((await bot.me()).username)
+        username = (await bot.me()).username
+        if username is not None:
+            caption += suggested_track_text(username)
     return SendAudio(
         chat_id=chat_id,
         audio=data["file_id"],
@@ -266,14 +306,21 @@ async def update_link(
     SongPostStates.preparing,
     ActionCallback.filter(F.action == Action.TOGGLE_SUGGESTED),
 )
-async def toggle_suggested(query: CallbackQuery, state: FSMContext, bot: Bot):
+async def toggle_suggested(
+    query: CallbackQuery,
+    state: FSMContext,
+    bot: Bot,
+) -> TelegramMethod[bool]:
     data = await state.get_data()
     new_suggested = not data.get("suggested", False)
     await state.update_data(suggested=new_suggested)
     caption = generate_audio_caption(data["links"])
     if new_suggested:
-        caption += suggested_track_text((await bot.me()).username)
-    await query.message.edit_caption(caption, parse_mode="HTML", reply_markup=POST_KB)
+        username = (await bot.me()).username
+        if username is not None:
+            caption += suggested_track_text(username)
+    message = cast(Message, query.message)
+    await message.edit_caption(caption, parse_mode="HTML", reply_markup=POST_KB)
     return query.answer()
 
 
@@ -283,28 +330,30 @@ async def post(
     callback_data: PostCallback,
     state: FSMContext,
     config: Config,
-):
+) -> TelegramMethod[bool]:
     is_silent = not callback_data.notification
     dest = str(config.post_to)
-    message = await query.message.copy_to(dest, disable_notification=is_silent)
+    message = cast(Message, query.message)
+    m = await message.copy_to(dest, disable_notification=is_silent)
     await state.clear()
     link_dest = dest.lstrip("@") if dest.startswith("@") else f"c/{dest.removeprefix('-100')}"
-    await query.message.edit_caption(f"https://t.me/{link_dest}/{message.message_id}")
+    await message.edit_caption(f"https://t.me/{link_dest}/{m.message_id}")
     return query.answer("📩{} Successfully posted!".format("🔕" if is_silent else "🔔"))
 
 
 @router.callback_query(ActionCallback.filter(F.action == Action.CANCEL))
-async def cancel(query: CallbackQuery, state: FSMContext):
+async def cancel(query: CallbackQuery, state: FSMContext) -> TelegramMethod[bool]:
     await state.clear()
-    if query.message.text:
-        await query.message.edit_text("🚫 Post cancelled")
+    message = cast(Message, query.message)
+    if message.text:
+        await message.edit_text("🚫 Post cancelled")
     else:
-        await query.message.edit_reply_markup()
+        await message.edit_reply_markup()
     return query.answer("👌")
 
 
 @router.message(Command("start", "help"))
-async def hello(event: Message):
+async def hello(event: Message) -> TelegramMethod[Message]:
     return event.reply(
         "👋 Hello! I can help you suggest new music to @evgenrandmuz! Simply send me"
         " the name of the track or the track itself and I'll forward it."
@@ -312,7 +361,7 @@ async def hello(event: Message):
 
 
 @router.message(default_state, F.text | F.audio)
-async def fwd(message: Message, config: Config):
+async def fwd(message: Message, config: Config) -> TelegramMethod[Message]:
     # TODO: throttle
     await message.copy_to(chat_id=config.admin)
     return message.reply("📩 Okay, I've forwarded it, thanks!")

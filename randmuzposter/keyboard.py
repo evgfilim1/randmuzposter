@@ -7,7 +7,7 @@ __all__ = [
 ]
 
 from enum import Enum
-from typing import Literal
+from typing import Literal, cast
 
 from aiogram.filters.callback_data import CallbackData
 from aiogram.types import InlineKeyboardMarkup
@@ -52,7 +52,7 @@ def _generate_post_kb() -> InlineKeyboardMarkup:
         callback_data=ActionCallback(action=Action.TOGGLE_SUGGESTED),
     )
     builder.button(text="❌ Cancel", callback_data=ActionCallback(action=Action.CANCEL))
-    return builder.adjust(1).as_markup()
+    return cast(InlineKeyboardMarkup, builder.adjust(1).as_markup())
 
 
 POST_KB = _generate_post_kb()

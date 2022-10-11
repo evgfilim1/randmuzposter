@@ -8,7 +8,7 @@ __all__ = [
 
 import re
 from types import TracebackType
-from typing import Any, Literal, Type, TypeVar, overload
+from typing import Any, Literal, Type, TypeVar, cast, overload
 
 import httpx
 from aiogram.types import MessageEntity
@@ -22,9 +22,9 @@ class SongLinkClient:
     def __init__(self, user_country: str | None = None) -> None:
         self._client = httpx.AsyncClient(base_url="https://api.song.link/v1-alpha.1/")
         if user_country is not None:
-            self._client.params = {"userCountry": user_country}
+            self._client.params = self._client.params.set("userCountry", user_country)
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "SongLinkClient":
         return self
 
     @overload
@@ -46,15 +46,15 @@ class SongLinkClient:
     async def _request(self, **params: str) -> dict[str, Any]:
         resp = await self._client.get("/links", params=params)
         resp.raise_for_status()
-        return resp.json()
+        return cast(dict[str, Any], resp.json())
 
     async def get_platform_links_by_url(
         self,
         url: str,
-    ) -> dict[Service | Literal["self"], str] | None:
+    ) -> dict[Service | Literal["self"], str]:
         data = await self._request(url=url)
-        res = {
-            service: link
+        res: dict[Service | Literal["self"], str] = {
+            service: cast(str, link)
             for service in Service
             if (link := data["linksByPlatform"].get(service.name, {}).get("url")) is not None
         }
@@ -65,10 +65,10 @@ class SongLinkClient:
         self,
         platform: Service,
         song_id: str,
-    ) -> dict[Service | Literal["self"], str] | None:
+    ) -> dict[Service | Literal["self"], str]:
         data = await self._request(platform=platform.name, type="song", id=song_id)
-        res = {
-            service: link
+        res: dict[Service | Literal["self"], str] = {
+            service: cast(str, link)
             for service in Service
             if (link := data["linksByPlatform"].get(service.name, {}).get("url")) is not None
         }
@@ -112,7 +112,7 @@ def detect_audio_link(
             return None
         url = entity.extract_from(caption)
     else:
-        url = entity.url
+        url = cast(str, entity.url)
     if match := SONG_LINK_REGEX.search(url):
         return None, match
     for service, link_re in SERVICE_LINKS.items():
@@ -125,7 +125,7 @@ async def process_audio(
     caption: str | None,
     caption_entities: list[MessageEntity] | None,
     client: SongLinkClient,
-) -> dict[Service, str]:
+) -> dict[Service | Literal["self"], str]:
     for entity in caption_entities or ():
         res = detect_audio_link(entity, caption)
         if res is not None:
