@@ -144,15 +144,16 @@ async def handle_audio_common(
         logging.exception(f"Error processing audio: {details}")
         return dict(text=f"❌ {e}", reply_markup=kb)
 
+    new_links = {k.name if isinstance(k, Service) else k: v for k, v in links.items()}
     await state.update_data(
-        links={getattr(k, "name", k): v for k, v in links.items()},
+        links=new_links,
         file_id=message.audio.file_id,
     )
     await state.set_state(SongPostStates.preparing)
 
     return message.reply_audio(
         message.audio.file_id,
-        generate_audio_caption(links),  # type: ignore[arg-type]  # wtf?
+        generate_audio_caption(new_links),
         parse_mode="HTML",
         reply_markup=POST_KB,
     )

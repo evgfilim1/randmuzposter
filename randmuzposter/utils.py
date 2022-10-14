@@ -76,16 +76,12 @@ class SongLinkClient:
         return res
 
 
-def generate_audio_caption(links: dict[Service | str, str]) -> str:
+def generate_audio_caption(links: dict[str, str]) -> str:
     text = ""
     for service in Service:
-        if links.get(service.name) is not None:
-            link = links[service.name]
-        elif links.get(service) is not None:
-            link = links[service]
-        else:
+        if links.get(service.name) is None:
             continue
-        text += f'<a href="{link}">{service.value}</a>\n'
+        text += f'<a href="{links[service.name]}">{service.value}</a>\n'
     text += f"<a href='{links['self']}'>Other</a>\n"
     return text
 
