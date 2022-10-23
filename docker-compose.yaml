@@ -1,0 +1,5 @@
+services:
+  bot:
+    build: .
+    image: evgfilim1/randmuzposter:staging
+    env_file: .env
