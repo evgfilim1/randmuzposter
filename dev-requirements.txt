@@ -1,3 +1,4 @@
 black~=22.10.0
 isort~=5.10.1
 mypy~=0.982
+pydantic~=1.10.2  # Required for `pydantic.mypy` plugin

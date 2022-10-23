@@ -2,6 +2,10 @@
 
 [![black code style](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
+[![Lint code](https://github.com/evgfilim1/randmuzposter/actions/workflows/lint.yaml/badge.svg)](https://github.com/evgfilim1/randmuzposter/actions/workflows/lint.yaml)
+[![Build and push Docker image](https://github.com/evgfilim1/randmuzposter/actions/workflows/build.yaml/badge.svg)](https://github.com/evgfilim1/randmuzposter/actions/workflows/build.yaml)
+[![Deploy a Docker container](https://github.com/evgfilim1/randmuzposter/actions/workflows/deploy.yaml/badge.svg)](https://github.com/evgfilim1/randmuzposter/actions/workflows/deploy.yaml)
+
 A simple bot to help with posting music to my channel.
 
 ## Dependencies
