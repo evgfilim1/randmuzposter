@@ -1,0 +1,57 @@
+name: Deploy a Docker container
+
+on:
+  registry_package:
+    types:
+      - published
+      - updated
+  push:
+    branches:
+      - master
+    paths:
+      - ".github/workflows/deploy.yaml"
+
+env:
+  IMAGE_TAG: latest
+
+permissions:
+  contents: read
+
+jobs:
+  run:
+    name: Run latest version on server
+    if: >
+      github.event_name == 'push'
+      || github.event.registry_package.package_version.container_metadata.tag.name == 'latest'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+
+    steps:
+      - name: Get Docker Compose config file
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl \
+            -H "Accept: application/vnd.github.v3.raw" \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -o docker-compose.yaml \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/contents/docker-compose.prod.yaml"
+
+      - name: Deploy Docker app
+        env:
+          DOCKER_HOST: ssh://github@server.evgfilim1.me
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          SSH_PUBLIC_KEY: ${{ secrets.SSH_PUBLIC_KEY }}
+          ENV_FILE_CONTENT: ${{ secrets.ENV_FILE_CONTENT }}
+          COMPOSE_CMD: docker compose -p randmuzposter
+          REGISTRY: ghcr.io
+          IMAGE_NAME: ${{ github.repository }}
+        run: |
+          set -eu
+          mkdir ~/.ssh/
+          echo "$SSH_PRIVATE_KEY" >~/.ssh/id_ed25519 && chmod 600 ~/.ssh/id_ed25519
+          echo "$SSH_PUBLIC_KEY" >~/.ssh/known_hosts && chmod 600 ~/.ssh/known_hosts
+          echo "$ENV_FILE_CONTENT" >.env && chmod 400 .env
+          eval $COMPOSE_CMD pull
+          eval $COMPOSE_CMD up -d main

@@ -1,0 +1,5 @@
+services:
+  main:
+    image: "${REGISTRY:?}/${IMAGE_NAME:?}:${IMAGE_TAG:?}"
+    restart: unless-stopped
+    env_file: .env
