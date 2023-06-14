@@ -75,7 +75,7 @@ async def handle_retry(
     admin_filter,
     SongPostStates.edit_wait,
     F.audio.duration >= 3,
-    flags={"chat_action": "upload_audio"},
+    flags={"chat_action": "upload_document"},
 )
 async def handle_downloaded(
     message: Message,
@@ -95,7 +95,7 @@ async def handle_downloaded(
     admin_filter,
     default_state,
     F.audio.duration >= 3,
-    flags={"chat_action": "upload_audio"},
+    flags={"chat_action": "upload_document"},
 )
 async def handle_audio(
     message: Message,
@@ -182,7 +182,7 @@ async def edit_song(query: CallbackQuery, state: FSMContext) -> AnswerCallbackQu
 @router.message(
     SongPostStates.edit_song,
     F.audio.as_("audio"),
-    flags={"chat_action": "upload_audio"},
+    flags={"chat_action": "upload_document"},
 )
 async def save_audio(
     message: Message,
@@ -240,7 +240,7 @@ async def pop_link(query: CallbackQuery, bot: Bot, state: FSMContext) -> SendAud
     return await update_link(None, state, cast(Message, query.message).chat.id, bot)
 
 
-@router.message(admin_filter, SongPostStates.edit, flags={"chat_action": "upload_audio"})
+@router.message(admin_filter, SongPostStates.edit, flags={"chat_action": "upload_document"})
 async def resend_with_edited(
     message: Message,
     bot: Bot,
