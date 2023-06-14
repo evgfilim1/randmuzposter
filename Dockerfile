@@ -1,4 +1,4 @@
-FROM python:3.10-slim
+FROM python:3.11-slim
 
 WORKDIR /app
 RUN useradd -Ud /app randmuzposter
@@ -9,4 +9,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY randmuzposter ./randmuzposter
 
 USER randmuzposter:randmuzposter
-ENTRYPOINT ["/usr/bin/env", "python3.10", "-m", "randmuzposter"]
+ENTRYPOINT ["/usr/bin/env", "python3.11", "-m", "randmuzposter"]
